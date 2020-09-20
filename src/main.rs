@@ -16,6 +16,8 @@ use chrono::NaiveDate;
 use select::document::Document;
 use select::predicate::{Attr, Class, Name, Predicate};
 
+use serde::Deserialize;
+
 // scraping information from:
 //  - archiveofourown.org/works/<id>?view_adult=true&view_full_work=true (summary/chapter notes/content)
 //  - maybe archiveofourown.org/works/<id>/navigate (individial chapter dates/what original ao3rss used)
@@ -42,9 +44,7 @@ struct Chapter {
 }
 
 impl Work {
-    async fn scrape(work_id: u64) -> Result<Work, Box<dyn Error + Send + Sync>> {
-        let client = reqwest::Client::new();
-
+    async fn scrape(client: &reqwest::Client, work_id: u64) -> Result<Work, Box<dyn Error + Send + Sync>> {
         /*let navigation = client
         .get(&format!("https://archiveofourown.org/works/{}/navigate", work_id))
         .send()
@@ -199,6 +199,38 @@ fn keepalive_future<E: Unpin>(
     }
 }
 
+#[derive(Deserialize)]
+struct Token {
+    token: String
+}
+
+#[allow(unused)]
+async fn ao3_login(client: &reqwest::Client, username: &str, password: &str) -> Result<bool, reqwest::Error> {
+    let token: Token = client.get("https://archiveofourown.org/token_dispenser.json")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let params = [
+        ("utf8", "✓"),
+        ("authenticity_token", &token.token),
+        ("user[login]", username),
+        ("user[password]", password),
+        ("user[remember_me]", "1"),
+        ("commit", "Log in")
+    ];
+
+    let status = client.post("https://archiveofourown.org/users/login")
+        .form(&params)
+        .send()
+        .await?
+        .status();
+
+    // TODO: this is apparently incorrect
+    Ok(status == reqwest::StatusCode::FOUND)
+}
+
 fn rfc822(date: NaiveDate) -> String {
     date.format("%a, %d %b %Y 00:00:00 +0000").to_string()
 }
@@ -210,8 +242,14 @@ async fn main() {
     use warp::Filter;
     use hyper::body::Body;
 
+    let client = reqwest::ClientBuilder::new()
+        .user_agent(rocket_routes::APP_USER_AGENT)
+        .build().unwrap();
+
+    // TODO: login
+
     let work = warp::path!("work" / u64).and(warp::get()).map(|work_id| {
-        let fut = Work::scrape(work_id).map_ok(|work| {
+        let fut = Work::scrape(&client, work_id).map_ok(|work| {
             // generate rss feed
             // TODO: categories/tags?
             let channel = work.to_rss();
@@ -236,16 +274,22 @@ async fn main() {
 
 #[cfg(feature = "rocket")]
 mod rocket_routes {
-    use rocket::get;
+    use rocket::{get, State};
     use rocket::response::content::Xml;
-    use rocket::response::{Debug, Stream};
-    use tokio::io::StreamReader;
+    use rocket::response::{Stream, Responder};
     use super::*;
 
+    pub static APP_USER_AGENT: &str = concat!(
+        env!("CARGO_PKG_NAME"),
+        "/",
+        env!("CARGO_PKG_VERSION"),
+    );
+
     // long return type :(
+    // Result<Xml<Stream<StreamReader<impl futures_core::Stream<Item = Result<Bytes, std::io::Error>>, Bytes>>>, Debug<std::io::Error>>
     #[get("/work/<work_id>")]
-    pub async fn work(work_id: u64) -> Result<Xml<Stream<StreamReader<impl futures_core::Stream<Item = Result<Bytes, std::io::Error>>, Bytes>>>, Debug<std::io::Error>> {
-        let fut = Work::scrape(work_id).map_ok(|work| {
+    pub async fn work<'r>(work_id: u64, client: State<'r, reqwest::Client>) -> impl Responder<'r, 'r> {
+        let fut = Work::scrape(client.inner(), work_id).map_ok(|work| {
             // generate rss feed
             // TODO: categories/tags?
             let channel = work.to_rss();
@@ -261,7 +305,7 @@ mod rocket_routes {
         let stream = keepalive_future(fut.fuse());
         let reader = tokio::io::stream_reader(stream);
 
-        Ok(Xml(Stream::chunked(reader, rocket::response::DEFAULT_CHUNK_SIZE)))
+        Xml(Stream::chunked(reader, rocket::response::DEFAULT_CHUNK_SIZE))
     }
 }
 
@@ -269,6 +313,43 @@ mod rocket_routes {
 #[rocket::launch]
 fn launch() -> rocket::Rocket {
     use rocket::routes;
+
     rocket::ignite()
         .mount("/", routes![rocket_routes::work])
+        .attach(rocket::fairing::AdHoc::on_attach("Client Config", |mut rocket| async {
+            let client = reqwest::ClientBuilder::new()
+                .user_agent(rocket_routes::APP_USER_AGENT)
+                .cookie_store(true)
+                .build().unwrap();
+
+            let config = rocket.config().await;
+
+            use rocket::config::ConfigError;
+
+            // TEMPORARY -- it's not great that the password gets printed to console.
+            match (config.get_str("ao3_username"), config.get_str("ao3_password")) {
+                // if either one of them are missing, just ignore it
+                (Err(ConfigError::Missing(_)), _) => (),
+                (_, Err(ConfigError::Missing(_))) => (),
+
+                // if both are present, attempt to login
+                (Ok(username), Ok(password)) => {
+                    println!("Found login information!");
+                    let logged_in = ao3_login(&client, username, password).await.unwrap();
+
+                    if logged_in {
+                        println!("Successfully logged in!");
+                    } else {
+                        println!("Failed to log in.");
+                    }
+                },
+
+                // otherwise crash
+                (e1, e2) => {
+                    e1.unwrap(); e2.unwrap();
+                }
+            }
+
+            Ok(rocket.manage(client))
+        }))
 }

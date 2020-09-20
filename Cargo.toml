@@ -17,11 +17,13 @@ futures-util = "0.3"
 hyper = "0.13"
 tokio = { version = "*", features = ["macros"] }
 
+serde = { version = "1.0", features = ["derive"] }
+
 warp = { version = "0.2", optional = true }
 rocket = { version = "0.5.0-dev", optional = true, git = "https://github.com/SergioBenitez/Rocket" }
 
 rss = "1.9"
 select = "0.5"
-reqwest = "0.10"
+reqwest = { version = "0.10", features = ["cookies", "json"] }
 chrono = "0.4"
 async-stream = "0.3"
