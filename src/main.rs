@@ -8,7 +8,7 @@ use futures_util::{pin_mut, select};
 
 use async_stream::stream;
 
-use hyper::body::{Body, Bytes};
+use hyper::body::Bytes;
 use tokio::time::{interval, Duration};
 
 use chrono::NaiveDate;
@@ -174,9 +174,9 @@ fn parse_date_from_node(node: select::node::Node) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(&node.text(), "%Y-%m-%d").ok()
 }
 
-fn keepalive_future(
-    fut: impl FusedFuture<Output = Result<Bytes, Box<dyn Error + Send + Sync>>>,
-) -> impl Stream<Item = Result<Bytes, Box<dyn Error + Send + Sync>>> {
+fn keepalive_future<E: Unpin>(
+    fut: impl FusedFuture<Output = Result<Bytes, E>>,
+) -> impl Stream<Item = Result<Bytes, E>> {
     stream! {
         let mut interval = interval(Duration::from_millis(1000)); // every second
         pin_mut!(fut);
@@ -208,6 +208,7 @@ fn rfc822(date: NaiveDate) -> String {
 async fn main() {
     use warp::http::Response;
     use warp::Filter;
+    use hyper::body::Body;
 
     let work = warp::path!("work" / u64).and(warp::get()).map(|work_id| {
         let fut = Work::scrape(work_id).map_ok(|work| {
@@ -235,14 +236,16 @@ async fn main() {
 
 #[cfg(feature = "rocket")]
 mod rocket_routes {
-    use rocket::{get, routes, launch};
+    use rocket::get;
     use rocket::response::content::Xml;
-    use rocket::response::Debug;
+    use rocket::response::{Debug, Stream};
+    use tokio::io::StreamReader;
     use super::*;
 
+    // long return type :(
     #[get("/work/<work_id>")]
-    pub async fn work(work_id: u64) -> Result<Xml<Vec<u8>>, Debug<Box<dyn Error + Send + Sync>>> {
-        let body = Work::scrape(work_id).map_ok(|work| {
+    pub async fn work(work_id: u64) -> Result<Xml<Stream<StreamReader<impl futures_core::Stream<Item = Result<Bytes, std::io::Error>>, Bytes>>>, Debug<std::io::Error>> {
+        let fut = Work::scrape(work_id).map_ok(|work| {
             // generate rss feed
             // TODO: categories/tags?
             let channel = work.to_rss();
@@ -253,11 +256,12 @@ mod rocket_routes {
             channel.write_to(&mut res).unwrap();
 
             Bytes::from(res)
-        }).await.map_err(Debug)?;
+        }).map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
 
-        // TODO: keepalive?
+        let stream = keepalive_future(fut.fuse());
+        let reader = tokio::io::stream_reader(stream);
 
-        Ok((Xml(body.to_vec())))
+        Ok(Xml(Stream::chunked(reader, rocket::response::DEFAULT_CHUNK_SIZE)))
     }
 }
 
