@@ -221,8 +221,11 @@ async fn main() {
             Bytes::from(res)
         });
         let stream = keepalive_future(fut.fuse());
-        let resp = Response::new(Body::wrap_stream(stream));
-        resp
+
+        Response::builder()
+            .header("Content-Type", "application/rss+xml")
+            .body(Body::wrap_stream(stream))
+            .unwrap() // this should not panic, as the builder should not be given any invalid data.
     });
 
     warp::serve(work).run(([127, 0, 0, 1], 3336)).await;
