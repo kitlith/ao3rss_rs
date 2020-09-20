@@ -10,8 +10,6 @@ use async_stream::stream;
 
 use hyper::body::{Body, Bytes};
 use tokio::time::{interval, Duration};
-use warp::http::Response;
-use warp::Filter;
 
 use chrono::NaiveDate;
 
@@ -19,7 +17,7 @@ use select::document::Document;
 use select::predicate::{Attr, Class, Name, Predicate};
 
 // scraping information from:
-//  - archiveofourown.org/works/<id>?view_full_work=true (summary/chapter notes/content)
+//  - archiveofourown.org/works/<id>?view_adult=true&view_full_work=true (summary/chapter notes/content)
 //  - maybe archiveofourown.org/works/<id>/navigate (individial chapter dates/what original ao3rss used)
 
 struct Work {
@@ -54,7 +52,7 @@ impl Work {
         .map_ok(|x| Document::from(x.as_str()));*/
         let work = client
             .get(&format!(
-                "https://archiveofourown.org/works/{}?view_full_work=true",
+                "https://archiveofourown.org/works/{}?view_adult=true&view_full_work=true",
                 work_id
             ))
             .send()
@@ -205,8 +203,12 @@ fn rfc822(date: NaiveDate) -> String {
     date.format("%a, %d %b %Y 00:00:00 +0000").to_string()
 }
 
+#[cfg(feature = "warp")]
 #[tokio::main]
 async fn main() {
+    use warp::http::Response;
+    use warp::Filter;
+
     let work = warp::path!("work" / u64).and(warp::get()).map(|work_id| {
         let fut = Work::scrape(work_id).map_ok(|work| {
             // generate rss feed
@@ -229,4 +231,40 @@ async fn main() {
     });
 
     warp::serve(work).run(([127, 0, 0, 1], 3336)).await;
+}
+
+#[cfg(feature = "rocket")]
+mod rocket_routes {
+    use rocket::{get, routes, launch};
+    use rocket::response::content::Xml;
+    use rocket::response::Debug;
+    use super::*;
+
+    #[get("/work/<work_id>")]
+    pub async fn work(work_id: u64) -> Result<Xml<Vec<u8>>, Debug<Box<dyn Error + Send + Sync>>> {
+        let body = Work::scrape(work_id).map_ok(|work| {
+            // generate rss feed
+            // TODO: categories/tags?
+            let channel = work.to_rss();
+
+            // TODO: validate?
+
+            let mut res = Vec::new();
+            channel.write_to(&mut res).unwrap();
+
+            Bytes::from(res)
+        }).await.map_err(Debug)?;
+
+        // TODO: keepalive?
+
+        Ok((Xml(body.to_vec())))
+    }
+}
+
+#[cfg(feature = "rocket")]
+#[rocket::launch]
+fn launch() -> rocket::Rocket {
+    use rocket::routes;
+    rocket::ignite()
+        .mount("/", routes![rocket_routes::work])
 }
