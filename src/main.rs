@@ -19,8 +19,8 @@ use select::document::Document;
 use select::predicate::{Attr, Class, Name, Predicate};
 
 // scraping information from:
-//  - archiveofourown.org/works/<id>/navigate (individial chapter dates!)
 //  - archiveofourown.org/works/<id>?view_full_work=true (summary/chapter notes/content)
+//  - maybe archiveofourown.org/works/<id>/navigate (individial chapter dates/what original ao3rss used)
 
 struct Work {
     work_id: u64,
