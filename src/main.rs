@@ -11,7 +11,11 @@ use async_stream::stream;
 use hyper::body::Bytes;
 use tokio::time::{interval, Duration};
 
-use chrono::NaiveDate;
+use rocket::{get, State};
+use rocket::response::content::Xml;
+use rocket::response::{Stream as RocketStream, Responder};
+
+use chrono::{NaiveDate, FixedOffset, TimeZone};
 
 use select::document::Document;
 use select::predicate::{Attr, Class, Name, Predicate};
@@ -232,93 +236,46 @@ async fn ao3_login(client: &reqwest::Client, username: &str, password: &str) -> 
 }
 
 fn rfc822(date: NaiveDate) -> String {
-    date.format("%a, %d %b %Y 00:00:00 +0000").to_string()
+    FixedOffset::east(0).from_utc_datetime(&date.and_hms(0, 0, 0)).to_rfc2822()
 }
 
-#[cfg(feature = "warp")]
-#[tokio::main]
-async fn main() {
-    use warp::http::Response;
-    use warp::Filter;
-    use hyper::body::Body;
+static APP_USER_AGENT: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "/",
+    env!("CARGO_PKG_VERSION"),
+);
 
-    let client = reqwest::ClientBuilder::new()
-        .user_agent(rocket_routes::APP_USER_AGENT)
-        .build().unwrap();
+// Result<Xml<Stream<StreamReader<impl futures_core::Stream<Item = Result<Bytes, std::io::Error>>, Bytes>>>, Debug<std::io::Error>>
+#[get("/work/<work_id>")]
+pub async fn work<'r>(work_id: u64, client: State<'r, reqwest::Client>) -> impl Responder<'r, 'r> {
+    let fut = Work::scrape(client.inner(), work_id).map_ok(|work| {
+        // generate rss feed
+        // TODO: categories/tags?
+        let channel = work.to_rss();
 
-    // TODO: login
+        // TODO: validate?
 
-    let work = warp::path!("work" / u64).and(warp::get()).map(|work_id| {
-        let fut = Work::scrape(&client, work_id).map_ok(|work| {
-            // generate rss feed
-            // TODO: categories/tags?
-            let channel = work.to_rss();
+        let mut res = Vec::new();
+        channel.write_to(&mut res).unwrap();
 
-            // TODO: validate?
+        Bytes::from(res)
+    }).map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
 
-            let mut res = Vec::new();
-            channel.write_to(&mut res).unwrap();
+    let stream = keepalive_future(fut.fuse());
+    let reader = tokio::io::stream_reader(stream);
 
-            Bytes::from(res)
-        });
-        let stream = keepalive_future(fut.fuse());
-
-        Response::builder()
-            .header("Content-Type", "application/rss+xml")
-            .body(Body::wrap_stream(stream))
-            .unwrap() // this should not panic, as the builder should not be given any invalid data.
-    });
-
-    warp::serve(work).run(([127, 0, 0, 1], 3336)).await;
+    Xml(RocketStream::chunked(reader, rocket::response::DEFAULT_CHUNK_SIZE))
 }
 
-#[cfg(feature = "rocket")]
-mod rocket_routes {
-    use rocket::{get, State};
-    use rocket::response::content::Xml;
-    use rocket::response::{Stream, Responder};
-    use super::*;
-
-    pub static APP_USER_AGENT: &str = concat!(
-        env!("CARGO_PKG_NAME"),
-        "/",
-        env!("CARGO_PKG_VERSION"),
-    );
-
-    // long return type :(
-    // Result<Xml<Stream<StreamReader<impl futures_core::Stream<Item = Result<Bytes, std::io::Error>>, Bytes>>>, Debug<std::io::Error>>
-    #[get("/work/<work_id>")]
-    pub async fn work<'r>(work_id: u64, client: State<'r, reqwest::Client>) -> impl Responder<'r, 'r> {
-        let fut = Work::scrape(client.inner(), work_id).map_ok(|work| {
-            // generate rss feed
-            // TODO: categories/tags?
-            let channel = work.to_rss();
-
-            // TODO: validate?
-
-            let mut res = Vec::new();
-            channel.write_to(&mut res).unwrap();
-
-            Bytes::from(res)
-        }).map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err));
-
-        let stream = keepalive_future(fut.fuse());
-        let reader = tokio::io::stream_reader(stream);
-
-        Xml(Stream::chunked(reader, rocket::response::DEFAULT_CHUNK_SIZE))
-    }
-}
-
-#[cfg(feature = "rocket")]
 #[rocket::launch]
 fn launch() -> rocket::Rocket {
     use rocket::routes;
 
     rocket::ignite()
-        .mount("/", routes![rocket_routes::work])
+        .mount("/", routes![work])
         .attach(rocket::fairing::AdHoc::on_attach("Client Config", |mut rocket| async {
             let client = reqwest::ClientBuilder::new()
-                .user_agent(rocket_routes::APP_USER_AGENT)
+                .user_agent(APP_USER_AGENT)
                 .cookie_store(true)
                 .build().unwrap();
 
