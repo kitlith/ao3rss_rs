@@ -7,13 +7,13 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-keepalive = []
+default = ["keepalive"]
+
+keepalive = ["async-stream"]
 
 [dependencies]
-futures-core = "0.3"
 futures-util = "0.3"
 
-hyper = "0.13"
 tokio = { version = "*", features = ["macros"] }
 
 serde = { version = "1.0", features = ["derive"] }
@@ -24,4 +24,7 @@ rss = "1.9"
 select = "0.5"
 reqwest = { version = "0.10", features = ["cookies", "json"] }
 chrono = "0.4"
-async-stream = "0.3"
+
+# keepalive
+async-stream = { version = "0.3", optional = true }
+hyper = "0.13" # only directly used when keepalive feature is present

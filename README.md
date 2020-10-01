@@ -17,6 +17,7 @@ Usage is basically the same as the original ao3rss.
    - In the future, it should be feasible to scrape both and combine the data, but I figured this was enough for the moment.
  - Features a keep-alive interval. Every second that the RSS feed has not been generated, `<!-- keepalive -->` will be sent.
    - This is an ugly hack. There's probably another way around this. (If I knew what it was, I wouldn't be doing this.)
+   - This is enabled by the `keepalive` feature, which can be disabled by passing `--no-default-features` to cargo when building.
 
 ## TODO
  - Configuration. Everything is kinda hardcoded at the moment.
